@@ -4,10 +4,12 @@ pydantic==2.5.0
 pandas==2.2.0
 numpy==1.26.4
 scipy==1.11.4
-scikit-learn==1.4.0
+scikit-learn>=1.6.0
 xgboost==2.0.3
 lightgbm==4.1.0
 catboost==1.2.2
 joblib  # ← 추가
 requests  # ← 추가
 imbalanced-learn  # ← 추가 (SMOTETomek용)
+dill==0.3.8        # ← 추가!
+gensim==4.3.2      # ← FastText 있으면 추가
