@@ -1,5 +1,5 @@
 """
-FastAPI 서버 - v17 Production
+FastAPI 서버 - v17 Production (로컬 모델 사용)
 """
 
 from fastapi import FastAPI, HTTPException
@@ -10,8 +10,7 @@ import pandas as pd
 from pathlib import Path
 import logging
 from typing import Optional, Dict, Any
-import requests
-import os
+from contextlib import asynccontextmanager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,46 +18,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="사기 탐지 API v17", version="17.0")
-
-MODEL_PATH = Path("/app/fraud_detector_v17_recall75.joblib")
-MODEL_DOWNLOAD_URL = os.getenv("MODEL_URL", "")  # 환경변수로!
+# ============================================================================
+# 설정
+# ============================================================================
+MODEL_PATH = Path("./model_v17_lightweight.pkl")  # 로컬 파일 경로로 변경!
 model_artifacts = None
-
-
-# ============================================================================
-# 모델 다운로드
-# ============================================================================
-
-def download_model():
-    """Google Drive에서 모델 다운로드"""
-    if MODEL_PATH.exists():
-        file_size = MODEL_PATH.stat().st_size
-        if file_size > 1_000_000:
-            logger.info(f"기존 모델 사용: {file_size / (1024*1024):.2f} MB")
-            return True
-
-    if not MODEL_DOWNLOAD_URL:
-        logger.warning("MODEL_URL 환경변수 없음")
-        return False
-
-    logger.info("모델 다운로드 시작...")
-
-    try:
-        response = requests.get(MODEL_DOWNLOAD_URL, stream=True, timeout=300)
-        response.raise_for_status()
-
-        with open(MODEL_PATH, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-
-        logger.info(f"다운로드 완료: {MODEL_PATH.stat().st_size / (1024*1024):.2f} MB")
-        return True
-
-    except Exception as e:
-        logger.error(f"다운로드 실패: {e}")
-        return False
 
 
 # ============================================================================
@@ -71,10 +35,13 @@ def load_model():
 
     logger.info("모델 로딩 시작...")
 
-    if not download_model():
+    if not MODEL_PATH.exists():
+        logger.error(f"모델 파일 없음: {MODEL_PATH}")
+        logger.error(f"현재 디렉토리: {Path.cwd()}")
         return None
 
     try:
+        logger.info(f"파일 크기: {MODEL_PATH.stat().st_size / (1024*1024):.2f} MB")
         artifacts = joblib.load(MODEL_PATH)
 
         logger.info("모델 로드 완료!")
@@ -172,7 +139,7 @@ def predict_fraud(job_data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ============================================================================
-# Pydantic
+# Pydantic Models
 # ============================================================================
 
 class JobPosting(BaseModel):
@@ -195,6 +162,8 @@ class JobPosting(BaseModel):
 
 
 class PredictionResponse(BaseModel):
+    model_config = {"protected_namespaces": ()}  # Pydantic 경고 해결
+
     is_fraud: bool
     fraud_probability: float
     confidence: float
@@ -204,20 +173,38 @@ class PredictionResponse(BaseModel):
 
 
 # ============================================================================
-# API
+# FastAPI App
 # ============================================================================
 
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """앱 생명주기 관리"""
+    # Startup
     global model_artifacts
     logger.info("서버 시작...")
     model_artifacts = load_model()
 
     if model_artifacts:
-        logger.info("서버 준비 완료!")
+        logger.info("✅ 서버 준비 완료!")
     else:
-        logger.warning("모델 없이 시작 (헬스체크만)")
+        logger.warning("⚠️  모델 로드 실패 (헬스체크만 가능)")
 
+    yield
+
+    # Shutdown
+    logger.info("서버 종료...")
+
+
+app = FastAPI(
+    title="사기 탐지 API v17",
+    version="17.0",
+    lifespan=lifespan  # on_event 대신 사용
+)
+
+
+# ============================================================================
+# API Endpoints
+# ============================================================================
 
 @app.get("/")
 async def root():
