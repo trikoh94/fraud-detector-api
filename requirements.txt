@@ -13,3 +13,4 @@ requests  # ← 추가
 imbalanced-learn  # ← 추가 (SMOTETomek용)
 dill==0.3.8        # ← 추가!
 gensim==4.3.2      # ← FastText 있으면 추가
+huggingface-hub>=0.20.0

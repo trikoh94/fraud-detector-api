@@ -1,16 +1,15 @@
 """
-FastAPI 서버 - v17 Production (로컬 모델 사용)
+FastAPI 서버 - v17 Production (Hugging Face Hub)
 """
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import joblib
 import numpy as np
 import pandas as pd
-from pathlib import Path
 import logging
 from typing import Optional, Dict, Any
 from contextlib import asynccontextmanager
+from model import load_model
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,48 +18,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# 설정
+# Global Variables
 # ============================================================================
-MODEL_PATH = Path("./model_v17_lightweight.pkl")  # 로컬 파일 경로로 변경!
 model_artifacts = None
-
-
-# ============================================================================
-# 모델 로드
-# ============================================================================
-
-def load_model():
-    """모델 로드"""
-    global model_artifacts
-
-    logger.info("모델 로딩 시작...")
-
-    if not MODEL_PATH.exists():
-        logger.error(f"모델 파일 없음: {MODEL_PATH}")
-        logger.error(f"현재 디렉토리: {Path.cwd()}")
-        return None
-
-    try:
-        logger.info(f"파일 크기: {MODEL_PATH.stat().st_size / (1024*1024):.2f} MB")
-        artifacts = joblib.load(MODEL_PATH)
-
-        logger.info("모델 로드 완료!")
-        logger.info(f"  버전: {artifacts.get('version', 'unknown')}")
-        logger.info(f"  Threshold: {artifacts.get('threshold', 0.20):.3f}")
-
-        if 'metrics' in artifacts:
-            metrics = artifacts['metrics']
-            logger.info(f"  Recall: {metrics.get('recall', 0):.2%}")
-            logger.info(f"  Precision: {metrics.get('precision', 0):.2%}")
-            logger.info(f"  F1: {metrics.get('f1', 0):.2%}")
-
-        return artifacts
-
-    except Exception as e:
-        logger.error(f"모델 로드 실패: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return None
 
 
 # ============================================================================
@@ -99,7 +59,7 @@ def predict_fraud(job_data: Dict[str, Any]) -> Dict[str, Any]:
 
         # 5. 예측
         model = model_artifacts['model']
-        threshold = model_artifacts.get('threshold', 0.20)
+        threshold = model_artifacts.get('threshold', 0.08)
 
         proba = model.predict_proba(X)[0, 1]
         is_fraud = bool(proba >= threshold)
@@ -110,7 +70,7 @@ def predict_fraud(job_data: Dict[str, Any]) -> Dict[str, Any]:
         else:
             confidence = min((threshold - proba) / threshold, 1.0)
 
-        # 7. Risk level (threshold 기준)
+        # 7. Risk level
         if proba >= threshold * 2:
             risk_level = "매우 높음"
         elif proba >= threshold * 1.5:
@@ -162,7 +122,7 @@ class JobPosting(BaseModel):
 
 
 class PredictionResponse(BaseModel):
-    model_config = {"protected_namespaces": ()}  # Pydantic 경고 해결
+    model_config = {"protected_namespaces": ()}
 
     is_fraud: bool
     fraud_probability: float
@@ -181,13 +141,19 @@ async def lifespan(app: FastAPI):
     """앱 생명주기 관리"""
     # Startup
     global model_artifacts
-    logger.info("서버 시작...")
+    logger.info("🚀 서버 시작...")
+    logger.info("=" * 70)
+
     model_artifacts = load_model()
 
     if model_artifacts:
+        logger.info("=" * 70)
         logger.info("✅ 서버 준비 완료!")
+        logger.info("=" * 70)
     else:
+        logger.warning("=" * 70)
         logger.warning("⚠️  모델 로드 실패 (헬스체크만 가능)")
+        logger.warning("=" * 70)
 
     yield
 
@@ -198,7 +164,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="사기 탐지 API v17",
     version="17.0",
-    lifespan=lifespan  # on_event 대신 사용
+    description="Fake Job Posting Detector - Powered by Hugging Face",
+    lifespan=lifespan
 )
 
 
@@ -212,6 +179,11 @@ async def root():
         "message": "사기 탐지 API v17",
         "status": "running",
         "model_loaded": model_artifacts is not None,
+        "model_info": {
+            "version": model_artifacts.get('version') if model_artifacts else None,
+            "threshold": model_artifacts.get('threshold') if model_artifacts else None,
+            "source": "https://huggingface.co/functionss/fake-job-detector"
+        },
         "endpoints": {
             "health": "/health",
             "predict": "/predict",
@@ -222,24 +194,57 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    return {
-        "status": "healthy",
-        "model_loaded": model_artifacts is not None,
-        "model_version": model_artifacts.get('version') if model_artifacts else None,
-        "threshold": model_artifacts.get('threshold') if model_artifacts else None
-    }
+    if model_artifacts:
+        metrics = model_artifacts.get('metrics', {})
+        return {
+            "status": "healthy",
+            "model_loaded": True,
+            "model_version": model_artifacts.get('version'),
+            "threshold": model_artifacts.get('threshold'),
+            "performance": {
+                "recall": metrics.get('recall'),
+                "precision": metrics.get('precision'),
+                "f1": metrics.get('f1'),
+                "roc_auc": metrics.get('roc_auc')
+            }
+        }
+    else:
+        return {
+            "status": "degraded",
+            "model_loaded": False,
+            "message": "Model not loaded"
+        }
 
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict(job: JobPosting):
+    """
+    Predict if a job posting is fraudulent
+
+    Returns:
+        - is_fraud: Boolean indicating if job is fraudulent
+        - fraud_probability: Probability score (0-1)
+        - confidence: Model confidence (0-1)
+        - risk_level: Risk assessment (매우 낮음 ~ 매우 높음)
+        - threshold: Decision threshold used
+        - model_version: Model version
+    """
+
     if model_artifacts is None:
-        raise HTTPException(status_code=503, detail="모델 로드 안됨")
+        raise HTTPException(
+            status_code=503,
+            detail="Model not loaded. Please try again later."
+        )
 
     try:
         job_dict = job.model_dump()
         result = predict_fraud(job_dict)
 
-        logger.info(f"예측 완료: {result['is_fraud']} ({result['fraud_probability']:.2%})")
+        logger.info(
+            f"예측: {result['is_fraud']} "
+            f"({result['fraud_probability']:.2%}) - "
+            f"{job_dict.get('title', 'N/A')[:50]}"
+        )
 
         return PredictionResponse(**result)
 
@@ -247,9 +252,20 @@ async def predict(job: JobPosting):
         raise
     except Exception as e:
         logger.error(f"예측 오류: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================================
+# Run
+# ============================================================================
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="info")
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8080,
+        log_level="info"
+    )

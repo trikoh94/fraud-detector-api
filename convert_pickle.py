@@ -16,11 +16,11 @@ class PosixPath(PurePosixPath):
 import pathlib
 pathlib.PosixPath = PosixPath
 
-# models.py import
-import models
-sys.modules['models'] = models
-from models import (FeatureExtractor, BERTEmbedder, FocalLossClassifier,
-                    AdvancedFeatureExtractor, ProductionMonitor)
+# downloadmodels.py import
+import downloadmodels
+sys.modules['models'] = downloadmodels
+from downloadmodels import (FeatureExtractor, BERTEmbedder, FocalLossClassifier,
+                            AdvancedFeatureExtractor, ProductionMonitor)
 
 print("🔄 production_model_v13.pkl 로딩...")
 
@@ -141,7 +141,7 @@ try:
     file_size = os.path.getsize('fraud_detection_render_v2.pkl')
     print(f"✅ 완료: fraud_detection_render_v2.pkl ({file_size / 1024 / 1024:.1f} MB)")
     print("\n🚀 Git 명령어:")
-    print("  git add fraud_detection_render_v2.pkl main.py models.py requirements.txt")
+    print("  git add fraud_detection_render_v2.pkl main.py downloadmodels.py requirements.txt")
     print("  git commit -m 'Add dill model'")
     print("  git push")
 
