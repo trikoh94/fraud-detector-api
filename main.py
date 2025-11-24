@@ -1,9 +1,11 @@
 """
 FastAPI 서버 - v33 Production (Hugging Face Hub)
 FastText Optimized (min_count=3, vocab=15k)
+CORS enabled for Chrome Extensions
 """
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware  # ✅ CORS 추가
 from pydantic import BaseModel
 import numpy as np
 import pandas as pd
@@ -195,6 +197,16 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# 🔥 CORS 설정 추가 (Chrome Extension 지원)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 모든 Origin 허용 (프로덕션에서는 특정 도메인만 허용 권장)
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS", "HEAD"],  # OPTIONS, HEAD 명시적 허용
+    allow_headers=["*"],  # 모든 헤더 허용
+    expose_headers=["*"]
+)
+
 
 # ============================================================================
 # API Endpoints
@@ -224,6 +236,7 @@ async def root():
 
 @app.get("/health")
 async def health_check():
+    """Health check endpoint - 서버 상태 확인"""
     if model_artifacts:
         metrics = model_artifacts.get('metrics', {})
         return {
