@@ -1,5 +1,6 @@
 """
-FastAPI 서버 - v17 Production (Hugging Face Hub)
+FastAPI 서버 - v33 Production (Hugging Face Hub)
+FastText Optimized (min_count=3, vocab=15k)
 """
 
 from fastapi import FastAPI, HTTPException
@@ -28,7 +29,7 @@ model_artifacts = None
 # ============================================================================
 
 def predict_fraud(job_data: Dict[str, Any]) -> Dict[str, Any]:
-    """사기 여부 예측"""
+    """사기 여부 예측 - v33 최적화"""
 
     if model_artifacts is None:
         raise HTTPException(status_code=503, detail="모델 로드 안됨")
@@ -36,41 +37,61 @@ def predict_fraud(job_data: Dict[str, Any]) -> Dict[str, Any]:
     try:
         # 1. 전처리
         df = pd.DataFrame([job_data])
-        preprocessor = model_artifacts['preprocessor']
-        df = preprocessor.preprocess(df)
+        preprocessor = model_artifacts.get('preprocessor')
 
-        # 2. Domain features
+        if preprocessor:
+            df = preprocessor.preprocess(df)
+            job_dict = df.iloc[0].to_dict()
+        else:
+            # preprocessor 없으면 기본 정리만
+            job_dict = job_data
+
+        # 2. Domain features (83개)
         extractor = model_artifacts['feature_extractor']
-        features = extractor.extract_all_features(df.iloc[0].to_dict())
-        X_domain = pd.DataFrame([features]).fillna(0).replace([np.inf, -np.inf], 0)
+        feature_columns = model_artifacts['feature_columns']
 
-        # 3. TF-IDF
+        domain_features = extractor.extract_all_features(job_dict)
+        domain_df = pd.DataFrame([domain_features]).fillna(0).replace([np.inf, -np.inf], 0)
+        domain_df = domain_df.reindex(columns=feature_columns, fill_value=0)
+        X_domain = domain_df.values
+
+        # 3. TF-IDF (500개)
         tfidf = model_artifacts['tfidf']
-        text = df['title'].fillna('').iloc[0] + ' ' + df['description'].fillna('').iloc[0]
+        title = str(job_dict.get('title', ''))
+        description = str(job_dict.get('description', ''))
+        text = f"{title} {description}"
         X_tfidf = tfidf.transform([text]).toarray()
 
-        # 4. FastText (있으면)
-        embedder = model_artifacts.get('embedder')
-        if embedder and hasattr(embedder, 'model') and embedder.model:
-            X_ft = embedder.transform([text])
-            X = np.hstack([X_domain.values, X_tfidf, X_ft])
-        else:
-            X = np.hstack([X_domain.values, X_tfidf])
+        # 4. FastText (100개) - v33 Dictionary 방식!
+        fasttext_embedder = model_artifacts['fasttext_embedder']
+        X_fasttext = fasttext_embedder.get_embedding(text).reshape(1, -1)
 
-        # 5. 예측
+        # 5. Feature 결합 (683개)
+        X_final = np.hstack([X_domain, X_tfidf, X_fasttext])
+
+        # Feature 개수 검증
+        expected_features = len(feature_columns) + tfidf.max_features + fasttext_embedder.vector_size
+        if X_final.shape[1] != expected_features:
+            logger.error(f"Feature mismatch: expected {expected_features}, got {X_final.shape[1]}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Feature shape mismatch: expected {expected_features}, got {X_final.shape[1]}"
+            )
+
+        # 6. 예측
         model = model_artifacts['model']
-        threshold = model_artifacts.get('threshold', 0.08)
+        threshold = model_artifacts.get('threshold', 0.045)
 
-        proba = model.predict_proba(X)[0, 1]
+        proba = model.predict_proba(X_final)[0, 1]
         is_fraud = bool(proba >= threshold)
 
-        # 6. Confidence (threshold 기준)
+        # 7. Confidence (threshold 기준)
         if is_fraud:
             confidence = min((proba - threshold) / (1 - threshold), 1.0)
         else:
             confidence = min((threshold - proba) / threshold, 1.0)
 
-        # 7. Risk level
+        # 8. Risk level
         if proba >= threshold * 2:
             risk_level = "매우 높음"
         elif proba >= threshold * 1.5:
@@ -88,9 +109,11 @@ def predict_fraud(job_data: Dict[str, Any]) -> Dict[str, Any]:
             'confidence': float(confidence),
             'risk_level': risk_level,
             'threshold': float(threshold),
-            'model_version': model_artifacts.get('version', 'v17')
+            'model_version': model_artifacts.get('version', 'v33')
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"예측 실패: {e}")
         import traceback
@@ -149,6 +172,10 @@ async def lifespan(app: FastAPI):
     if model_artifacts:
         logger.info("=" * 70)
         logger.info("✅ 서버 준비 완료!")
+        logger.info(f"📊 Model Version: {model_artifacts.get('version', 'v33')}")
+        logger.info(f"🎯 Threshold: {model_artifacts.get('threshold', 0.045):.4f}")
+        logger.info(f"🔤 FastText Vocab: {model_artifacts['fasttext_embedder'].vocab_size:,}")
+        logger.info(f"📊 Features: 683 (83 domain + 500 TF-IDF + 100 FastText)")
         logger.info("=" * 70)
     else:
         logger.warning("=" * 70)
@@ -162,9 +189,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="사기 탐지 API v17",
-    version="17.0",
-    description="Fake Job Posting Detector - Powered by Hugging Face",
+    title="사기 탐지 API v33",
+    version="33.0",
+    description="Fake Job Posting Detector - FastText Optimized (Powered by Hugging Face)",
     lifespan=lifespan
 )
 
@@ -176,13 +203,16 @@ app = FastAPI(
 @app.get("/")
 async def root():
     return {
-        "message": "사기 탐지 API v17",
+        "message": "사기 탐지 API v33 - FastText Optimized",
         "status": "running",
         "model_loaded": model_artifacts is not None,
         "model_info": {
             "version": model_artifacts.get('version') if model_artifacts else None,
             "threshold": model_artifacts.get('threshold') if model_artifacts else None,
-            "source": "https://huggingface.co/functionss/fake-job-detector"
+            "fasttext_vocab": model_artifacts['fasttext_embedder'].vocab_size if model_artifacts else None,
+            "features": "683 (83 domain + 500 TF-IDF + 100 FastText)",
+            "optimization": "min_count=3, vocab=15k",
+            "source": "https://huggingface.co/functionss/fruaddetectionv2"
         },
         "endpoints": {
             "health": "/health",
@@ -201,6 +231,8 @@ async def health_check():
             "model_loaded": True,
             "model_version": model_artifacts.get('version'),
             "threshold": model_artifacts.get('threshold'),
+            "fasttext_vocab": model_artifacts['fasttext_embedder'].vocab_size,
+            "total_features": 683,
             "performance": {
                 "recall": metrics.get('recall'),
                 "precision": metrics.get('precision'),
@@ -227,7 +259,7 @@ async def predict(job: JobPosting):
         - confidence: Model confidence (0-1)
         - risk_level: Risk assessment (매우 낮음 ~ 매우 높음)
         - threshold: Decision threshold used
-        - model_version: Model version
+        - model_version: Model version (v33)
     """
 
     if model_artifacts is None:
@@ -263,6 +295,7 @@ async def predict(job: JobPosting):
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(
         app,
         host="0.0.0.0",
